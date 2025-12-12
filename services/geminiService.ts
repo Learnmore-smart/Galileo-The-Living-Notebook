@@ -13,14 +13,19 @@ const timeoutPromise = (ms: number) => new Promise<never>((_, reject) =>
   setTimeout(() => reject(new Error(`Request timed out after ${ms/1000}s`)), ms)
 );
 
-// Helper to clean JSON string if model adds markdown blocks
+// Helper to clean JSON string if model adds markdown blocks or conversational text
 const cleanJson = (text: string): string => {
-  let cleaned = text.trim();
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '');
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```/, '').replace(/```$/, '');
+  // First strip markdown code blocks
+  let cleaned = text.replace(/```json/g, '').replace(/```/g, '');
+  
+  // Find the first '{' and last '}' to extract the JSON object
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  
+  if (start !== -1 && end !== -1) {
+    return cleaned.substring(start, end + 1);
   }
+  
   return cleaned.trim();
 };
 
@@ -33,15 +38,22 @@ const sanitizeNumber = (val: any, min: number, max: number, fallback: number | u
 export const analyzeSketch = async (base64Image: string): Promise<SceneConfig> => {
   const prompt = `
     Analyze this physics sketch (canvas 800x600).
-    Identify shapes.
+    Identify physics bodies.
     
-    CRITICAL RULES:
-    1. CIRCLES are always dynamic balls.
-    2. RECTANGLES:
-       - If it is thin/long or spans a large portion of the width, it is a STATIC WALL or FLOOR (isStatic: true).
-       - If it is small or square-ish, it is a DYNAMIC BOX (isStatic: false).
-       - If unsure, default small rectangles to DYNAMIC.
+    CRITICAL INTERPRETATION RULES:
+    1. SOLID SHAPES vs LINES: 
+       - If you see a SQUARE, RECTANGLE, or CIRCLE drawn as an outline, interpret it as a SINGLE SOLID BODY. 
+       - DO NOT break a square into 4 separate line segments.
+       - DO NOT break a circle into arcs.
+    
+    2. CLASSIFICATION:
+       - Square/Box/Block -> DYNAMIC RECTANGLE (isStatic: false).
+       - Circle/Ball -> DYNAMIC CIRCLE (isStatic: false).
+       - Long single line / Horizon -> STATIC WALL/FLOOR (isStatic: true).
+       - "U" shape or "Bucket" -> 3 Static Walls.
+    
     3. PENDULUMS: If a shape is hanging from a line, create a constraint.
+    
     4. COORDINATES: Normalize to 800x600. (0,0 is top-left).
     
     Return JSON.
@@ -157,39 +169,49 @@ export const interpretVoiceCommand = async (
     1. INTELLIGENT TYPO CORRECTION:
        - The transcript may have phonetic errors. INTERPRET INTENT based on physics context.
        - "Fiction" -> "Friction".
-       - "Add a platform" -> Create a static rectangle.
        - "Pendelum" / "Pandulum" -> "Pendulum".
        - "Wait" -> "Weight" (implies size/mass).
        - "Mask" -> "Mass".
-       - "Add a floor" -> Create a static rectangle at the bottom.
     
-    2. SHAPE RULES:
-       - "PLATFORM" / "FLOOR" / "WALL" -> Type: rectangle, isStatic: true.
-       - "BOX" / "BLOCK" -> Type: rectangle, isStatic: false (unless specified otherwise).
-       - "BALL" / "CIRCLE" -> Type: circle, isStatic: false.
+    2. CREATION RULES (ADD):
+       - "Platform" / "Ground" / "Floor" -> Create STATIC rectangle.
+       - "Wall" -> Create STATIC vertical rectangle.
+       - When adding a new body, APPLY ALL ADJECTIVES IMMEDIATELY to 'newBodies'.
+       - "Add a slippery box" -> Create box in 'newBodies' with friction: 0.001.
+       - "Add a red ball" -> Create ball in 'newBodies' with color: "#ff0000".
+       - "Add a heavy block" -> Create larger rectangle.
     
     3. PROPERTIES & MODIFIERS:
        - FRICTION (0.0 to 1.0): 
           * "Ice", "Slippery", "No friction" -> friction: 0.001
           * "Normal" -> friction: 0.1
-          * "Sticky", "Rough", "High friction" -> friction: 0.9
+          * "Sticky", "Rough", "High friction", "With friction" -> friction: 0.9
        - POSITION:
           * If position is not specified for a new object, place it near the center (x:400, y:200) so it drops.
           * "Floor" / "Ground" -> y: 580, width: 800, height: 40.
 
-    4. COMPLEX OBJECTS:
+    4. GRAVITY & PHYSICS (CRITICAL: Units are m/s²):
+       - DEFAULT EARTH GRAVITY is 9.81.
+       - "Moon" gravity -> y: 1.62.
+       - "Mars" gravity -> y: 3.71.
+       - "Jupiter" or "High" gravity -> y: 24.79.
+       - "Zero" / "No" gravity -> y: 0.
+       - "Invert" / "Reverse" gravity -> y: -9.81.
+       - TIME SCALE: Default is 1. DO NOT change 'timeScale' unless the user explicitly asks for "Slow motion" (0.5) or "Fast forward" (2.0).
+
+    5. COMPLEX OBJECTS:
        - "Pendulum" -> 
          * Create Body A: Static small circle (Pivot).
          * Create Body B: Dynamic circle (Bob).
          * Create Constraint: Connect A and B.
        - "Ramp" -> Static rectangle with angle (e.g., 0.5 radians).
 
-    5. ACTIONS:
+    6. ACTIONS:
        - MODIFY: If the user says "Make the box slippery", find the 'box' in EXISTING BODIES and return it in 'updatedBodies' with new friction.
        - ADD: Return in 'newBodies'.
        - REMOVE: Return ID in 'removeBodyIds'.
 
-    Return JSON only.
+    Return JSON only. No markdown. No explanations.
   `;
 
   try {
@@ -285,7 +307,8 @@ export const interpretVoiceCommand = async (
           },
         },
       }),
-      timeoutPromise(12000) // Reduced to 12s
+      // Increased timeout to 30s to prevent early termination
+      timeoutPromise(30000)
     ]) as GenerateContentResponse;
 
     if (response.text) {
@@ -293,7 +316,8 @@ export const interpretVoiceCommand = async (
       try {
         result = JSON.parse(cleanJson(response.text)) as VoiceCommandResponse;
       } catch (parseError) {
-        throw new Error("I couldn't understand what you mean.");
+        console.error("JSON Parse Error:", parseError, "Raw Text:", response.text);
+        throw new Error("I heard you, but I couldn't process the command (Invalid Response).");
       }
       
       const timestamp = Date.now().toString().slice(-4);
@@ -350,6 +374,10 @@ export const interpretVoiceCommand = async (
     // Return friendly errors for common issues
     if (error.message.includes("timed out")) {
         throw new Error("I couldn't understand what you mean (Request Timed Out).");
+    }
+    // Return the specific error if we threw it manually (like Invalid Response)
+    if (error.message.includes("Invalid Response")) {
+        throw error;
     }
     // For any other error (including blocked content), use the friendly message
     throw new Error("I couldn't understand what you mean.");

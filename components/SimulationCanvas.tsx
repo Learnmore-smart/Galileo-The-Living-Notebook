@@ -307,11 +307,20 @@ const SimulationCanvas: React.FC<SimulationCanvasProps> = ({ sceneConfig, physic
   // Update Physics (Gravity/Time)
   useEffect(() => {
     if (engineRef.current) {
-      engineRef.current.gravity.x = physicsState.gravity.x;
-      engineRef.current.gravity.y = physicsState.gravity.y;
-      if (runnerRef.current) {
-         engineRef.current.timing.timeScale = physicsState.timeScale;
-      }
+        // Matter.js defaults: scale=0.001, y=1.
+        // If we map 9.81 m/s² (Earth) to Matter's y=1, we must scale inputs by 1/9.81.
+        // This ensures Earth is "Normal" speed, and Jupiter (24.79) is ~2.5x Normal speed.
+        // We also clamp to prevent crash.
+        const GRAVITY_SCALE_FACTOR = 1 / 9.81;
+        const normalizedY = physicsState.gravity.y * GRAVITY_SCALE_FACTOR;
+        const normalizedX = physicsState.gravity.x * GRAVITY_SCALE_FACTOR;
+
+        engineRef.current.gravity.x = isFinite(normalizedX) ? Math.min(Math.max(normalizedX, -10), 10) : 0;
+        engineRef.current.gravity.y = isFinite(normalizedY) ? Math.min(Math.max(normalizedY, -10), 10) : 1;
+      
+        if (runnerRef.current) {
+            engineRef.current.timing.timeScale = physicsState.timeScale;
+        }
     }
   }, [physicsState.gravity, physicsState.timeScale]);
 
