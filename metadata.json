@@ -1,0 +1,8 @@
+{
+  "name": "Living Notebook",
+  "description": "A multimodal physics playground that turns sketches into simulations using Gemini.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
